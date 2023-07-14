@@ -1,6 +1,7 @@
 package bobbin_test
 
 import (
+  "context"
   "errors"
   bobbin "github.com/smcty/bobbin"
   "reflect"
@@ -74,7 +75,7 @@ func TestGoPanic(t *testing.T) {
 func TestGoAfterAllPreviousReturns(t *testing.T) {
   tb := &bobbin.Bobbin{}
   tb.Go(nothing)
-  time.Sleep(time.Second)
+  time.Sleep(time.Millisecond * 100)
   tb.Go(nothing)
   tb.Wait()
 
@@ -191,5 +192,55 @@ func checkState(t *testing.T, tb *bobbin.Bobbin, wantDying, wantDead bool, wantE
     case !reflect.DeepEqual(waitErr, wantErr):
       t.Errorf("Wait: want %#v, got %#v", wantErr, waitErr)
     }
+  }
+}
+
+type BobbinCtxPair struct {
+  bob *bobbin.Bobbin
+
+  // Parent context of the above bobbin. If the context is cancelled,
+  // the bobbin must get killed.
+  ctx context.Context
+}
+
+// Returns bobbins [self, child, grandchild].
+func constructHierarchicalBobbins() []BobbinCtxPair {
+  var list []BobbinCtxPair
+  ctx := context.Background()
+
+  // bob will be kill if ctx is cancelled.
+  // childCtx will be cancelled when bob is killed.
+  bob, childCtx := bobbin.WithContext(ctx)
+  list = append(list, BobbinCtxPair{bob, ctx})
+
+  // childbob will be killed if childCtx is cancelled.
+  // grandChildCtx will be cancelled when childbob is killed.
+  childbob, grandChildCtx := bobbin.WithContext(childCtx)
+  list = append(list, BobbinCtxPair{childbob, childCtx})
+
+  grandChildBob, _ := bobbin.WithContext(grandChildCtx)
+  list = append(list, BobbinCtxPair{grandChildBob, grandChildCtx})
+
+  return list
+}
+
+func TestParentBobbinKillsChildren(t *testing.T) {
+  bobbinFamily := constructHierarchicalBobbins()
+
+  bobbinFamily[0].bob.Kill(nil)
+  bobbinFamily[2].bob.Wait()
+  <-bobbinFamily[2].ctx.Done()
+
+  bobbinFamily[1].bob.Wait()
+  bobbinFamily[1].ctx.Done()
+}
+
+func TestKillingChildDoesNotKillParent(t *testing.T) {
+  bobbinFamily := constructHierarchicalBobbins()
+
+  bobbinFamily[1].bob.Kill(nil)
+  time.Sleep(time.Millisecond * 50)
+  if !bobbinFamily[0].bob.Alive() {
+    t.Error("Parent Bobbin is expected to be alive.")
   }
 }
