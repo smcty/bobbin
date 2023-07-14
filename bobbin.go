@@ -39,7 +39,8 @@
 // channel is closed to flag that all tracked goroutines are supposed
 // to willingly terminate as soon as possible.
 //
-// Once all tracked goroutines terminate, the Dead channel is closed,
+// Once Wait is invoked and all tracked goroutines terminate,
+// the Dead channel is closed,
 // and Wait unblocks and returns the first non-nil error presented
 // to the bobbin via a result or an explicit Kill or Killf method call,
 // or nil if there were no errors.
@@ -73,11 +74,16 @@ import (
 //
 // See the package documentation for details.
 type Bobbin struct {
-  m      sync.Mutex
-  alive  int
-  dying  chan struct{}
-  dead   chan struct{}
-  reason error
+  m     sync.Mutex
+  alive int
+
+  // Indicates that goroutines were alive when wait was invoked. done channel
+  // will be closed when all those goroutines exit.
+  goroutinesAliveWhenWaitInvoked bool
+  waitInvoked                    bool
+  dying                          chan struct{}
+  dead                           chan struct{}
+  reason                         error
 
   // context.Context is available in Go 1.7+.
   parent interface{}
@@ -123,6 +129,23 @@ func (t *Bobbin) Dying() <-chan struct{} {
 // then returns the reason for their death.
 func (t *Bobbin) Wait() error {
   t.init()
+
+  t.m.Lock()
+  // Wait could be called multiple times. Prevent running this bookkeeping
+  // twice.
+  if !t.waitInvoked {
+    if t.alive > 0 {
+      // 'dead' channel will be closed when all the goroutines exit.
+      t.goroutinesAliveWhenWaitInvoked = true
+    } else {
+      // All goroutines already dead when this Wait() is invoked. Nothing to do.
+      // Unblock the waiter on the 'dead' channel.
+      close(t.dead)
+    }
+  }
+  t.waitInvoked = true
+  t.m.Unlock()
+
   <-t.dead
   t.m.Lock()
   reason := t.reason
@@ -139,13 +162,12 @@ func (t *Bobbin) Wait() error {
 // appropriately once it is in a dying state.
 //
 // It is safe for the f function to call the Go method again
-// to create additional tracked goroutines. Once all tracked
-// goroutines return, the Dead channel is closed and the
+// to create additional tracked goroutines. Once Wait is called and
+// all the tracked goroutines return, the Dead channel is closed and the
 // Wait method unblocks and returns the death reason.
 //
 // Calling the Go method after all tracked goroutines return
-// causes a runtime panic. For that reason, calling the Go
-// method a second time out of a tracked goroutine is unsafe.
+// is legal. But it is illegal to call Go method after Wait() is invoked.
 func (t *Bobbin) Go(f func() error) {
   t.init()
   t.m.Lock()
@@ -166,7 +188,7 @@ func (t *Bobbin) run(f func() error) {
   t.alive--
   if t.alive == 0 || err != nil {
     t.kill(err)
-    if t.alive == 0 {
+    if t.alive == 0 && t.goroutinesAliveWhenWaitInvoked {
       close(t.dead)
     }
   }

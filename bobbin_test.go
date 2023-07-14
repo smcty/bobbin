@@ -5,6 +5,7 @@ import (
   bobbin "github.com/smcty/bobbin"
   "reflect"
   "testing"
+  "time"
 )
 
 func nothing() error { return nil }
@@ -68,6 +69,17 @@ func TestGoPanic(t *testing.T) {
     checkState(t, tb, true, true, nil)
   }()
   tb.Go(nothing)
+}
+
+func TestGoAfterAllPreviousReturns(t *testing.T) {
+  tb := &bobbin.Bobbin{}
+  tb.Go(nothing)
+  time.Sleep(time.Second)
+  tb.Go(nothing)
+  tb.Wait()
+
+  // Invoke Wait a second time to test idempotency.
+  tb.Wait()
 }
 
 func TestKill(t *testing.T) {
