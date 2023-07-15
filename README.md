@@ -3,7 +3,8 @@ Installation and usage
 
 Bobbin is a fork of the tomb package with one minor but useful change.
 It allows invoking the Go() method even when all the previously tracked
-goroutines return.
+goroutines return. It also supports an OnKill() method for registering
+code to nudge existing goroutines to exit.
 
 This allows users to use Bobbin as a true WaitGroup + Context combination for
 tracking and waiting for all the child goroutines.
@@ -40,6 +41,8 @@ func Test() {
          // Do something.  
       })
   })
+
+  bob.OnKill(func() { fd.close() })
 
   // This sends a cancellation signal to all the child
   // contexts (and hence propagates the kill to all the
