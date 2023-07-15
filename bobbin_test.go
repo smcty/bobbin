@@ -244,3 +244,9 @@ func TestKillingChildDoesNotKillParent(t *testing.T) {
     t.Error("Parent Bobbin is expected to be alive.")
   }
 }
+
+func TestWaitWithoutStart(t *testing.T) {
+  // Ensure that waiting doesn't block when no goroutines were started.
+  bob := bobbin.Bobbin{}
+  bob.Wait()
+}
