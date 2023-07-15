@@ -250,3 +250,80 @@ func TestWaitWithoutStart(t *testing.T) {
   bob := bobbin.Bobbin{}
   bob.Wait()
 }
+
+func TestOnKill(t *testing.T) {
+  bob := bobbin.Bobbin{}
+
+  goRoutineChan := make(chan struct{})
+  onKillInvokedChan := make(chan struct{})
+
+  // Start a goroutine that runs until the given context is called.
+  bob.Go(func() error { <-goRoutineChan; return nil })
+
+  bob.OnKill(func() {
+    close(onKillInvokedChan)
+  })
+
+  isChannelClosed := func(ch <-chan struct{}) bool {
+    select {
+    case <-ch:
+      return true
+    default:
+      return false
+    }
+  }
+
+  if isChannelClosed(onKillInvokedChan) {
+    t.Error("OnKill functor must be invoked only after kill.")
+  }
+
+  // Invoke Wait(). OnKill() still should not be invoked.
+  go bob.Wait()
+
+  if isChannelClosed(onKillInvokedChan) {
+    t.Error("OnKill functor must be invoked only after kill.")
+  }
+
+  // Invoke kill. Onkill() must be invoked.
+  bob.Kill(nil)
+  <-onKillInvokedChan
+
+  // Invoke the goroutineChan to let the goroutine finish.
+  close(goRoutineChan)
+}
+
+func TestOnKillInvokedWithoutGoroutines(t *testing.T) {
+  {
+    // A bobbin without any functors ever started.
+    bob1 := bobbin.Bobbin{}
+    onKillInvokedChan := make(chan struct{})
+    bob1.OnKill(func() { close(onKillInvokedChan) })
+
+    bob1.Kill(nil)
+    <-onKillInvokedChan
+    bob1.Wait()
+  }
+
+  {
+    // A bobbin whose functors all returned.
+    bob2 := bobbin.Bobbin{}
+    bob2.Go(func() error { return nil })
+    onKillInvokedChan := make(chan struct{})
+    bob2.OnKill(func() { close(onKillInvokedChan) })
+    bob2.Kill(nil)
+    <-onKillInvokedChan
+  }
+}
+
+func TestGoNotAllowedAfterOnKill(t *testing.T) {
+  bob := bobbin.Bobbin{}
+  bob.OnKill(func() {})
+
+  defer func() {
+    err := recover()
+    if err != "bobbin.Go not allowed after bobbin.OnKill" {
+      t.Fatalf("Panic state mismatch: %v", err)
+    }
+  }()
+  bob.Go(func() error { return nil })
+}

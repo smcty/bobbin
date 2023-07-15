@@ -80,10 +80,15 @@ type Bobbin struct {
   // Indicates that goroutines were alive when wait was invoked. done channel
   // will be closed when all those goroutines exit.
   goroutinesAliveWhenWaitInvoked bool
-  waitInvoked                    bool
-  dying                          chan struct{}
-  dead                           chan struct{}
-  reason                         error
+
+  // We do not allow new goroutines after OnKill is registered. If we don't
+  // check for this, there will be issues where the newer goroutines will
+  // never get clean up causing hangs.
+  goNotAllowedAfterOnkill bool
+  waitInvoked             bool
+  dying                   chan struct{}
+  dead                    chan struct{}
+  reason                  error
 
   // context.Context is available in Go 1.7+.
   parent interface{}
@@ -172,26 +177,81 @@ func (t *Bobbin) Go(f func() error) {
   t.init()
   t.m.Lock()
   defer t.m.Unlock()
+  if t.goNotAllowedAfterOnkill {
+    panic("bobbin.Go not allowed after bobbin.OnKill")
+  }
+
   select {
   case <-t.dead:
     panic("bobbin.Go called after all goroutines terminated")
   default:
   }
-  t.alive++
-  go t.run(f)
+  t.runInBackground(f)
 }
 
-func (t *Bobbin) run(f func() error) {
-  err := f()
+func (t *Bobbin) runInBackground(f func() error) {
+  t.alive++
+  go func() {
+    err := f()
+    t.m.Lock()
+    defer t.m.Unlock()
+    t.alive--
+    if t.alive == 0 || err != nil {
+      t.kill(err)
+      if t.alive == 0 && t.goroutinesAliveWhenWaitInvoked {
+        close(t.dead)
+      }
+    }
+  }()
+}
+
+// OnKill registers a functor to run when this Bobbin receives a kill signal.
+//
+// This is used for performing cancellation. For example, a goroutine that is
+// performing a data copy using io.Copy could use this feature to close the
+// sockets upon receiving cancellation for nudging the copier out of the loop.
+//
+// This functor is NOT called during the normal course of operation when
+// a Kill() is not invoked and all goroutines exit naturally. In other words,
+// this is not intended to replace normal cleanup that is performed through
+// defer operations.
+func (t *Bobbin) OnKill(f func()) {
   t.m.Lock()
-  defer t.m.Unlock()
-  t.alive--
-  if t.alive == 0 || err != nil {
-    t.kill(err)
-    if t.alive == 0 && t.goroutinesAliveWhenWaitInvoked {
-      close(t.dead)
+  // No new goroutines allowed after OnKill registration.
+  t.goNotAllowedAfterOnkill = true
+  t.m.Unlock()
+
+  isAlreadyDead := func() bool {
+    select {
+    case <-t.dead:
+      return true
+    default:
+      return false
     }
   }
+
+  go func() {
+    select {
+    case <-t.Dead():
+      // Do not invoke the functor during normal course of operation when kill
+      // is never called.
+      return
+    case <-t.Dying():
+      t.m.Lock()
+      defer t.m.Unlock()
+
+      // Handle race conditions between Kill() and Wait().
+      if isAlreadyDead() {
+        return
+      }
+
+      // Run this functor f as an "official" tracked goroutine. This way,
+      // a subsequent Wait() will succeed only after this functor also finishes
+      // and thereby giving predictable behavior.
+      t.runInBackground(func() error { f(); return nil })
+      return
+    }
+  }()
 }
 
 // Kill puts the bobbin in a dying state for the given reason,
