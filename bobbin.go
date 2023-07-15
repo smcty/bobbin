@@ -86,9 +86,11 @@ type Bobbin struct {
   // never get clean up causing hangs.
   goNotAllowedAfterOnkill bool
   waitInvoked             bool
-  dying                   chan struct{}
+  killChan                chan struct{}
   dead                    chan struct{}
-  reason                  error
+
+  dyingChan chan struct{}
+  reason    error
 
   // context.Context is available in Go 1.7+.
   parent interface{}
@@ -110,7 +112,20 @@ func (t *Bobbin) init() {
   t.m.Lock()
   if t.dead == nil {
     t.dead = make(chan struct{})
-    t.dying = make(chan struct{})
+    t.killChan = make(chan struct{})
+    t.dyingChan = make(chan struct{})
+
+    // Setup to close dyingChan when killed/dead.
+    go func() {
+      select {
+      case <-t.killChan:
+        close(t.dyingChan)
+        return
+      case <-t.dead:
+        close(t.dyingChan)
+        return
+      }
+    }()
     t.reason = ErrStillAlive
   }
   t.m.Unlock()
@@ -124,10 +139,11 @@ func (t *Bobbin) Dead() <-chan struct{} {
 }
 
 // Dying returns the channel that can be used to wait until
-// t.Kill is called.
+// t.Kill is called, or dead (all go-routines returned and Wait is called).
 func (t *Bobbin) Dying() <-chan struct{} {
   t.init()
-  return t.dying
+
+  return t.dyingChan
 }
 
 // Wait blocks until all goroutines have finished running, and
@@ -153,6 +169,9 @@ func (t *Bobbin) Wait() error {
 
   <-t.dead
   t.m.Lock()
+  if t.reason == ErrStillAlive {
+    t.reason = nil
+  }
   reason := t.reason
   t.m.Unlock()
   return reason
@@ -196,11 +215,12 @@ func (t *Bobbin) runInBackground(f func() error) {
     t.m.Lock()
     defer t.m.Unlock()
     t.alive--
-    if t.alive == 0 || err != nil {
+
+    if err != nil {
       t.kill(err)
-      if t.alive == 0 && t.goroutinesAliveWhenWaitInvoked {
-        close(t.dead)
-      }
+    }
+    if t.alive == 0 && t.goroutinesAliveWhenWaitInvoked {
+      close(t.dead)
     }
   }()
 }
@@ -216,6 +236,8 @@ func (t *Bobbin) runInBackground(f func() error) {
 // this is not intended to replace normal cleanup that is performed through
 // defer operations.
 func (t *Bobbin) OnKill(f func()) {
+  t.init()
+
   t.m.Lock()
   // No new goroutines allowed after OnKill registration.
   t.goNotAllowedAfterOnkill = true
@@ -236,7 +258,7 @@ func (t *Bobbin) OnKill(f func()) {
       // Do not invoke the functor during normal course of operation when kill
       // is never called.
       return
-    case <-t.Dying():
+    case <-t.killChan:
       t.m.Lock()
       defer t.m.Unlock()
 
@@ -282,7 +304,7 @@ func (t *Bobbin) kill(reason error) {
   }
   if t.reason == ErrStillAlive {
     t.reason = reason
-    close(t.dying)
+    close(t.killChan)
     for _, child := range t.child {
       child.cancel()
     }

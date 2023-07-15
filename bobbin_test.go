@@ -159,16 +159,21 @@ func TestKillErrStillAlivePanic(t *testing.T) {
 }
 
 func checkState(t *testing.T, tb *bobbin.Bobbin, wantDying, wantDead bool, wantErr error) {
-  select {
-  case <-tb.Dying():
-    if !wantDying {
+  if wantDying {
+    <-tb.Dying()
+  } else {
+    // Give some time to ensure that the event propagates so that the check is
+    // more reliable below. This sleep doesn't affect test correctness
+    // /flakiness.
+    time.Sleep(10 * time.Millisecond)
+
+    select {
+    case <-tb.Dying():
       t.Error("<-Dying: should block")
-    }
-  default:
-    if wantDying {
-      t.Error("<-Dying: should not block")
+    default:
     }
   }
+
   seemsDead := false
   select {
   case <-tb.Dead():
@@ -251,6 +256,16 @@ func TestWaitWithoutStart(t *testing.T) {
   bob.Wait()
 }
 
+func isChannelClosed(ch <-chan struct{}) bool {
+  time.Sleep(1 * time.Millisecond)
+  select {
+  case <-ch:
+    return true
+  default:
+    return false
+  }
+}
+
 func TestOnKill(t *testing.T) {
   bob := bobbin.Bobbin{}
 
@@ -263,15 +278,6 @@ func TestOnKill(t *testing.T) {
   bob.OnKill(func() {
     close(onKillInvokedChan)
   })
-
-  isChannelClosed := func(ch <-chan struct{}) bool {
-    select {
-    case <-ch:
-      return true
-    default:
-      return false
-    }
-  }
 
   if isChannelClosed(onKillInvokedChan) {
     t.Error("OnKill functor must be invoked only after kill.")
@@ -310,6 +316,12 @@ func TestOnKillInvokedWithoutGoroutines(t *testing.T) {
     bob2.Go(func() error { return nil })
     onKillInvokedChan := make(chan struct{})
     bob2.OnKill(func() { close(onKillInvokedChan) })
+
+    if isChannelClosed(onKillInvokedChan) {
+      t.Error("OnKill functor must not be invoked even when all goroutines" +
+        " return.")
+    }
+
     bob2.Kill(nil)
     <-onKillInvokedChan
   }
