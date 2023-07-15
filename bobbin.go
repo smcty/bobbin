@@ -113,19 +113,6 @@ func (t *Bobbin) init() {
   if t.dead == nil {
     t.dead = make(chan struct{})
     t.killChan = make(chan struct{})
-    t.dyingChan = make(chan struct{})
-
-    // Setup to close dyingChan when killed/dead.
-    go func() {
-      select {
-      case <-t.killChan:
-        close(t.dyingChan)
-        return
-      case <-t.dead:
-        close(t.dyingChan)
-        return
-      }
-    }()
     t.reason = ErrStillAlive
   }
   t.m.Unlock()
@@ -142,6 +129,22 @@ func (t *Bobbin) Dead() <-chan struct{} {
 // t.Kill is called, or dead (all go-routines returned and Wait is called).
 func (t *Bobbin) Dying() <-chan struct{} {
   t.init()
+
+  if t.dyingChan == nil {
+    t.dyingChan = make(chan struct{})
+
+    // Setup to close dyingChan when killed/dead.
+    go func() {
+      select {
+      case <-t.killChan:
+        close(t.dyingChan)
+        return
+      case <-t.dead:
+        close(t.dyingChan)
+        return
+      }
+    }()
+  }
 
   return t.dyingChan
 }
