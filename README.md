@@ -5,7 +5,7 @@ Bobbin is a fork of the tomb package with one minor but useful change.
 It allows invoking the Go() method even when all the previously tracked
 goroutines return.
 
-This allows users to use Bobbin as a true WaitGroup replacment for
+This allows users to use Bobbin as a true WaitGroup + Context combination for
 tracking and waiting for all the child goroutines.
 
 Example Usage:
@@ -19,6 +19,15 @@ func Test() {
   // Wait for all the child goroutines to finish.
   defer bob.Wait()
 
+  // Start a tracked goroutine.
+  bob.Go(func () {
+  })
+
+  // Start a second goroutine. This was not allowed by the
+  // original tomb package (Tomb doesn't allow invoking
+  // Go after all the tracked goroutines return).
+  bob.Go(func() { })
+
   // Start a child go-routine.
   bob.Go(func() { 
       childBob, grandChildCtx := bobbin.WithContext(ctx)
@@ -31,6 +40,11 @@ func Test() {
          // Do something.  
       })
   })
+
+  // This sends a cancellation signal to all the child
+  // contexts (and hence propagates the kill to all the
+  // child bobbins).
+  bob.Kill()
 }
 ```
 
